@@ -262,24 +262,64 @@ async function getNIP98AuthHeader(url: string, method: 'GET' | 'PUT' | 'POST', s
 }
 
 interface ServerCapabilities {
+  isBlossom: boolean;
   isNip96: boolean;
   nip96Config: Record<string, unknown> | null;
 }
 
 async function getServerCapabilities(serverUrl: string): Promise<ServerCapabilities> {
+  let isNip96 = false;
+  let nip96Config: Record<string, unknown> | null = null;
+
+  // 1. Check NIP-96
   try {
     const wellKnownUrl = new URL('/.well-known/nostr/nip96.json', serverUrl).toString();
     const res = await fetch(wellKnownUrl);
     if (res.ok) {
       const config = (await res.json()) as Record<string, unknown>;
       if (typeof config.api_url === 'string') {
-        return { isNip96: true, nip96Config: config };
+        isNip96 = true;
+        nip96Config = config;
       }
     }
   } catch {
     // Ignore errors, server likely doesn't support NIP-96
   }
-  return { isNip96: false, nip96Config: null };
+
+  // 2. Check Blossom root endpoint (response agnostic) for validation/logging
+  try {
+    const rootUrl = new URL('/', serverUrl).toString();
+    const res = await fetch(rootUrl);
+    if (res.ok) {
+      const text = await res.text();
+      let confirmed = false;
+      
+      // Check plain text responses (e.g., "Welcome to Primal Blossom server...")
+      if (text.toLowerCase().includes('blossom') || text.includes('BUD-')) {
+        confirmed = true;
+      } else {
+        // Check JSON responses (e.g., {"name": "Azzamo", "protocols": ["BUD-01", ...]})
+        try {
+          const json = JSON.parse(text);
+          if (json.protocols && Array.isArray(json.protocols) && json.protocols.some((p: string) => p.startsWith('BUD-'))) {
+            confirmed = true;
+          }
+        } catch {
+          // Not JSON, already checked text
+        }
+      }
+      
+      if (!confirmed) {
+        console.warn(`[Blossom Sync] Server ${serverUrl} root response did not clearly identify as a Blossom server, but will attempt anyway.`);
+      }
+    }
+  } catch (err) {
+    console.warn(`[Blossom Sync] Could not reach root of ${serverUrl} for capability discovery.`, err);
+  }
+
+  // We assume isBlossom is true since it's from the user's 10063 list, 
+  // the root check above is primarily for logging/validation.
+  return { isBlossom: true, isNip96, nip96Config };
 }
 
 async function verifyBlobSha256(blob: Blob, expectedHash: string): Promise<boolean> {
