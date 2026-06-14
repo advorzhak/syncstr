@@ -185,17 +185,17 @@ export function useSyncBlossomBlobs() {
           
           console.log(`[Blossom Sync] Verified ${shortHash}... (${(blobData.size / 1024).toFixed(1)} KB). Syncing to missing servers...`);
           
-          let serverUploadSuccess = true;
           const sourceBlobUrl = `${sourceServer.replace(/\/$/, '')}/${hash}`;
 
-          for (const targetServer of needsIt) {
+          // Process target servers concurrently for this blob to improve performance
+          const uploadPromises = needsIt.map(async (targetServer) => {
             console.log(`[Blossom Sync] Attempting BUD-04 mirror of ${shortHash}... to ${targetServer}`);
             
             const mirrored = await mirrorBlob(targetServer, sourceBlobUrl, hash, user.signer);
             
             if (mirrored) {
               console.log(`[Blossom Sync] Mirrored ${shortHash}... to ${targetServer} successfully.`);
-              continue; // Move to next target server
+              return true;
             }
 
             // Fallback to download/upload if mirroring is unsupported or failed
@@ -205,11 +205,15 @@ export function useSyncBlossomBlobs() {
             
             if (uploaded) {
               console.log(`[Blossom Sync] Uploaded ${shortHash}... to ${targetServer} successfully (fallback).`);
+              return true;
             } else {
               console.warn(`[Blossom Sync] Failed to upload ${shortHash}... to ${targetServer} (fallback).`);
-              serverUploadSuccess = false;
+              return false;
             }
-          }
+          });
+
+          const results = await Promise.all(uploadPromises);
+          const serverUploadSuccess = results.every(r => r);
           
           if (serverUploadSuccess) {
             successCount++;
@@ -438,29 +442,26 @@ async function mirrorBlob(
   const shortHash = sha256.slice(0, 8);
 
   try {
-    // 1. Try BUD-11 (Kind 24242) with t="mirror"
     const authHeader = await getBlossomAuthHeader('mirror', sha256, signer);
-    
-    let res = await fetch(mirrorUrl, {
-      method: 'PUT',
-      headers: {
-        'Authorization': authHeader,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ url: sourceUrl })
-    });
+    const mirrorPayload = JSON.stringify({ url: sourceUrl });
+
+    const attemptMirror = async (auth: string) => {
+      return fetch(mirrorUrl, {
+        method: 'PUT',
+        headers: {
+          'Authorization': auth,
+          'Content-Type': 'application/json'
+        },
+        body: mirrorPayload
+      });
+    };
+
+    let res = await attemptMirror(authHeader);
 
     // Fallback to NIP-98 if 401
     if (res.status === 401) {
       const nip98Auth = await getNIP98AuthHeader(mirrorUrl, 'PUT', signer);
-      res = await fetch(mirrorUrl, {
-        method: 'PUT',
-        headers: {
-          'Authorization': nip98Auth,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ url: sourceUrl })
-      });
+      res = await attemptMirror(nip98Auth);
     }
 
     if (res.ok) {
