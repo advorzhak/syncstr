@@ -135,6 +135,14 @@ wss://relay.snort.social      # Snort relay
 wss://nostr.wine              # Wine relay
 ```
 
+### Local Network & MagicDNS Relays
+
+SyncStr natively supports connecting to local Nostr relays and Tailscale MagicDNS relays:
+
+- **MagicDNS**: Simply enter your Tailscale MagicDNS name (e.g., `wss://my-relay.tailnet.ts.net`). The OS will automatically resolve it to your local Tailscale IP. Ensure your local relay is serving valid TLS certificates for `wss://` or use `ws://` if accessing from `http://localhost`.
+- **Local Network**: Enter your local IP address or hostname (e.g., `ws://192.168.1.50:8080` or `ws://raspberrypi.local:8080`). 
+- **NIP-65 Integration**: If you publish your local/MagicDNS relay to your NIP-65 Relay List Metadata, SyncStr will automatically discover and suggest it when you log in.
+
 ### Environment Variables
 
 Create a `.env.local` file for local development:

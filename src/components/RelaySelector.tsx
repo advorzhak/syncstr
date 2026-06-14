@@ -97,7 +97,7 @@ export function RelaySelector(props: RelaySelectorProps) {
       <PopoverContent className="w-[300px] p-0">
         <Command>
           <CommandInput 
-            placeholder="Search relays or type URL..." 
+            placeholder="Search relays, type URL, or MagicDNS name (e.g., relay.ts.net)..." 
             value={inputValue}
             onValueChange={setInputValue}
           />

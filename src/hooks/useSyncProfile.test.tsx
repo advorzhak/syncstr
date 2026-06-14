@@ -2,8 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useSyncProfile } from './useSyncProfile';
-import type { NostrEvent } from '@nostrify/nostrify';
+import { NUser } from '@nostrify/react/login';
+import type { NPoolOpts, NRelay1Opts, NostrEvent, NostrSigner } from '@nostrify/nostrify';
 import * as Nostrify from '@nostrify/nostrify';
+import type { AppContextType } from '@/contexts/AppContext';
 
 vi.mock('@/hooks/useAppContext');
 vi.mock('@/hooks/useCurrentUser');
@@ -18,7 +20,7 @@ import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useToast } from '@/hooks/useToast';
 
 const mockToast = vi.fn();
-const mockAppContext = {
+const mockAppContext: AppContextType = {
   config: {
     theme: 'light',
     relayUrl: 'wss://default.relay.test',
@@ -27,14 +29,16 @@ const mockAppContext = {
   presetRelays: [],
 };
 
-const mockUser = {
-  pubkey: 'testpubkey123',
-  signer: {
-    signEvent: vi.fn().mockImplementation((event: any) => 
-      Promise.resolve({ ...event, pubkey: 'testpubkey123', id: 'mockid', sig: 'mocksig' })
-    ),
-  },
+const mockSignEvent = vi.fn().mockImplementation((event: Parameters<NostrSigner['signEvent']>[0]) =>
+  Promise.resolve({ ...event, pubkey: 'testpubkey123', id: 'mockid', sig: 'mocksig' })
+);
+
+const mockSigner: NostrSigner = {
+  getPublicKey: vi.fn().mockResolvedValue('testpubkey123'),
+  signEvent: mockSignEvent,
 };
+
+const mockUser = new NUser('nsec', 'testpubkey123', mockSigner);
 
 const mockEvent1: NostrEvent = {
   id: 'event1id123456789',
@@ -58,9 +62,11 @@ describe('useSyncProfile', () => {
       },
     });
 
-    (useAppContext as any).mockReturnValue(mockAppContext);
-    (useCurrentUser as any).mockReturnValue({ user: mockUser });
-    (useToast as any).mockReturnValue({ toast: mockToast });
+    vi.mocked(useAppContext).mockReturnValue(mockAppContext);
+    vi.mocked(useCurrentUser).mockReturnValue(
+      { user: mockUser, users: [mockUser] } as unknown as ReturnType<typeof useCurrentUser>
+    );
+    vi.mocked(useToast).mockReturnValue({ toast: mockToast } as unknown as ReturnType<typeof useToast>);
   });
 
   afterEach(() => {
@@ -75,10 +81,12 @@ describe('useSyncProfile', () => {
 
   it('should successfully publish events to target relay', async () => {
     const mockEventResult = vi.fn().mockResolvedValue(undefined);
-    (Nostrify.NPool as any).mockImplementation((opts: any) => ({
+    vi.mocked(Nostrify.NPool).mockImplementation(() => ({
       event: mockEventResult,
-    }));
-    (Nostrify.NRelay1 as any).mockImplementation(() => ({}));
+    } as unknown as InstanceType<typeof Nostrify.NPool>));
+    vi.mocked(Nostrify.NRelay1).mockImplementation(() =>
+      ({} as unknown as InstanceType<typeof Nostrify.NRelay1>)
+    );
 
     const { result } = renderHook(() => useSyncProfile(), { wrapper });
 
@@ -116,10 +124,12 @@ describe('useSyncProfile', () => {
       return Promise.resolve(undefined);
     });
 
-    (Nostrify.NPool as any).mockImplementation(() => ({
+    vi.mocked(Nostrify.NPool).mockImplementation(() => ({
       event: mockEventResult,
-    }));
-    (Nostrify.NRelay1 as any).mockImplementation(() => ({}));
+    } as unknown as InstanceType<typeof Nostrify.NPool>));
+    vi.mocked(Nostrify.NRelay1).mockImplementation(() =>
+      ({} as unknown as InstanceType<typeof Nostrify.NRelay1>)
+    );
 
     const { result } = renderHook(() => useSyncProfile(), { wrapper });
 
@@ -138,10 +148,12 @@ describe('useSyncProfile', () => {
 
   it('should fail if both target and default relay fail', async () => {
     const mockEventResult = vi.fn().mockRejectedValue(new Error('Relay connection failed'));
-    (Nostrify.NPool as any).mockImplementation(() => ({
+    vi.mocked(Nostrify.NPool).mockImplementation(() => ({
       event: mockEventResult,
-    }));
-    (Nostrify.NRelay1 as any).mockImplementation(() => ({}));
+    } as unknown as InstanceType<typeof Nostrify.NPool>));
+    vi.mocked(Nostrify.NRelay1).mockImplementation(() =>
+      ({} as unknown as InstanceType<typeof Nostrify.NRelay1>)
+    );
 
     const { result } = renderHook(() => useSyncProfile(), { wrapper });
 
@@ -160,22 +172,25 @@ describe('useSyncProfile', () => {
 
   it('should configure NRelay1 with NIP-42 AUTH callback', async () => {
     let capturedRelayUrl = '';
-    let capturedAuthCallback: ((challenge: string) => Promise<any>) | undefined;
+    let capturedAuthCallback: NRelay1Opts['auth'];
 
-    (Nostrify.NRelay1 as any).mockImplementation((url: string, opts: any) => {
+    vi.mocked(Nostrify.NRelay1).mockImplementation((url, opts) => {
       capturedRelayUrl = url;
       if (opts?.auth) {
         capturedAuthCallback = opts.auth;
       }
-      return { url, opts };
+      return { url, opts } as unknown as InstanceType<typeof Nostrify.NRelay1> & {
+        url: string;
+        opts?: NRelay1Opts;
+      };
     });
 
     const mockEventResult = vi.fn().mockResolvedValue(undefined);
-    (Nostrify.NPool as any).mockImplementation((_opts: any) => {
-      if (_opts.open) {
-        _opts.open('wss://target.relay.test');
+    vi.mocked(Nostrify.NPool).mockImplementation((opts: NPoolOpts<InstanceType<typeof Nostrify.NRelay1>>) => {
+      if (opts.open) {
+        opts.open('wss://target.relay.test');
       }
-      return { event: mockEventResult };
+      return { event: mockEventResult } as unknown as InstanceType<typeof Nostrify.NPool>;
     });
 
     const { result } = renderHook(() => useSyncProfile(), { wrapper });

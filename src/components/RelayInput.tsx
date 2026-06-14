@@ -84,7 +84,7 @@ export function RelayInput({
               <Input
                 id="relay-input"
                 type="text"
-                placeholder={placeholder}
+                placeholder={placeholder || "wss://relay.example.com or relay.ts.net"}
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 className="flex-1 bg-white/5 border-white/10 text-white placeholder:text-white/40"

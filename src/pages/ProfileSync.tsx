@@ -9,6 +9,7 @@ import { BackupControls } from '@/components/BackupControls';
 import { RelayInput } from '@/components/RelayInput';
 import { ProfileDataCard } from '@/components/ProfileDataCard';
 import { SyncButton } from '@/components/SyncButton';
+import { BlossomSyncCard } from '@/components/BlossomSyncCard';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -28,7 +29,7 @@ const normalizeRelayUrl = (url: string): string => {
     return trimmed;
   }
   
-  // Auto-add wss:// prefix for domain-like inputs
+  // Auto-add wss:// prefix for domain-like inputs (including .local and .ts.net)
   if (trimmed.includes('.') && !trimmed.includes('://')) {
     return `wss://${trimmed}`;
   }
@@ -308,8 +309,8 @@ export function ProfileSync() {
             {!isBackupMode ? (
               <RelayInput
                 title="Source Relay"
-                description="The relay to read your current profile data from (wss:// will be added automatically)"
-                placeholder="i.e. relay.damus.io"
+                description="The relay to read your current profile data from. Supports Tailscale MagicDNS (e.g., umbrel.ts.net) and local addresses."
+                placeholder="i.e. relay.damus.io, umbrel.ts.net, or umbrel.local:4848"
                 onRelayChange={handleSourceRelayChange}
                 value={sourceRelay}
                 isConnected={!!profileData}
@@ -382,7 +383,7 @@ export function ProfileSync() {
                   <RadioIcon className="h-5 w-5 text-violet-400" />
                   <CardTitle className="text-lg text-white">Target Relay</CardTitle>
                 </div>
-                <CardDescription className="text-white/60">The relay to copy your profile data to (wss:// will be added automatically)</CardDescription>
+                 <CardDescription className="text-white/60">The relay to copy your profile data to. Supports Tailscale MagicDNS (e.g., umbrel.ts.net) and local addresses (e.g., umbrel.local:4848). wss:// will be added automatically.</CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="space-y-4">
@@ -391,7 +392,7 @@ export function ProfileSync() {
                     <Input
                       id="target-relay-input"
                       type="text"
-                      placeholder="i.e. relay.nostr.band"
+                      placeholder="i.e. relay.nostr.band, umbrel.ts.net, or umbrel.local:4848"
                       value={targetRelay}
                       onChange={(e) => setTargetRelay(e.target.value)}
                       onBlur={(e) => setTargetRelay(normalizeRelayUrl(e.target.value))}
@@ -448,6 +449,9 @@ export function ProfileSync() {
                 </div>
               </CardContent>
             </Card>
+
+            {/* Blossom Sync Section */}
+            <BlossomSyncCard />
 
             {/* Sync Controls */}
             <SyncButton
