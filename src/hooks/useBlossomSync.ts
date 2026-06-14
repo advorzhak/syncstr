@@ -382,25 +382,16 @@ export async function uploadBlob(
   nip96Config?: Record<string, unknown>
 ): Promise<boolean> {
   const baseUrl = serverUrl.replace(/\/$/, '');
-  
-  // 1. Try Blossom BUD-02/BUD-11
   const blossomUrl = `${baseUrl}/upload`;
-  let authHeader = await getBlossomAuthHeader('upload', sha256, signer);
-  
-  let res = await fetch(blossomUrl, {
-    method: 'PUT',
-    headers: { 
-      'Authorization': authHeader,
-      'Content-Type': blob.type || 'application/octet-stream',
-      'X-SHA-256': sha256
-    },
-    body: blob
-  });
-  
-  // Fallback to NIP-98 for Blossom if 401
-  if (res.status === 401) {
-    authHeader = await getNIP98AuthHeader(blossomUrl, 'PUT', signer);
-    res = await fetch(blossomUrl, {
+  const shortHash = sha256.slice(0, 8);
+
+  // Helper to attempt a Blossom PUT upload
+  const attemptBlossomUpload = async (useNip98: boolean): Promise<Response> => {
+    const authHeader = useNip98 
+      ? await getNIP98AuthHeader(blossomUrl, 'PUT', signer)
+      : await getBlossomAuthHeader('upload', sha256, signer);
+    
+    return fetch(blossomUrl, {
       method: 'PUT',
       headers: { 
         'Authorization': authHeader,
@@ -409,6 +400,20 @@ export async function uploadBlob(
       },
       body: blob
     });
+  };
+
+  // 1. Try Blossom BUD-02/BUD-11 (with 1 retry for transient 5xx errors)
+  let res = await attemptBlossomUpload(false);
+  
+  if (res.status === 401) {
+    res = await attemptBlossomUpload(true); // Fallback to NIP-98
+  }
+
+  // Retry logic for transient gateway errors (502, 503, 504)
+  if (res.status >= 500 && res.status < 600) {
+    console.warn(`[Blossom Sync] Transient server error (${res.status}) for ${shortHash}... Retrying once...`);
+    await new Promise(resolve => setTimeout(resolve, 1500)); // 1.5s backoff
+    res = await attemptBlossomUpload(res.status === 401); // Preserve auth method if it was 401 before, though unlikely for 5xx
   }
   
   if (res.ok) {
@@ -417,7 +422,7 @@ export async function uploadBlob(
 
   // 2. If Blossom failed and we have NIP-96 config, try NIP-96
   if (nip96Config && typeof nip96Config.api_url === 'string') {
-    console.log(`[Blossom Sync] Blossom upload failed, trying NIP-96 fallback for ${sha256.slice(0, 8)}...`);
+    console.log(`[Blossom Sync] Blossom upload failed, trying NIP-96 fallback for ${shortHash}...`);
     const apiUrl = nip96Config.api_url;
     const nip96Url = apiUrl.startsWith('http') ? apiUrl : new URL(apiUrl, baseUrl).toString();
     
@@ -438,12 +443,16 @@ export async function uploadBlob(
       return true;
     }
     
-    const text = await nip96Res.text().catch(() => '');
-    console.warn(`[Blossom Sync] NIP-96 Upload failed to ${nip96Url}: ${nip96Res.status} ${text}`);
+    await nip96Res.text().catch(() => ''); // Consume body to free resources
+    console.warn(`[Blossom Sync] NIP-96 Upload also failed to ${nip96Url}: ${nip96Res.status}`);
   }
   
   const finalText = await res.text().catch(() => '');
-  console.warn(`[Blossom Sync] Upload failed for ${sha256.slice(0, 8)}... to ${serverUrl}: ${res.status} ${finalText}`);
+  const errorMsg = res.status >= 500 
+    ? `Gateway/Server error (${res.status}). The server may be overloaded or have strict timeout limits for large files.`
+    : finalText;
+    
+  console.warn(`[Blossom Sync] Upload permanently failed for ${shortHash}... to ${serverUrl}: ${res.status} ${errorMsg}`);
   return false;
 }
 
