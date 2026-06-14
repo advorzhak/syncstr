@@ -109,6 +109,17 @@ export function useSyncBlossomBlobs() {
 
       console.log(`[Blossom Sync] Starting bi-directional sync across ${servers.length} servers.`);
 
+      // 0. Fetch server capabilities (NIP-96 support)
+      console.log(`[Blossom Sync] Checking server capabilities...`);
+      const serverCapabilities = new Map<string, ServerCapabilities>();
+      for (const server of servers) {
+        const caps = await getServerCapabilities(server);
+        serverCapabilities.set(server, caps);
+        if (caps.isNip96) {
+          console.log(`[Blossom Sync] ${server} supports NIP-96.`);
+        }
+      }
+
       // 1. Build inventory of what exists on each server
       const serverBlobs = new Map<string, Set<string>>();
       const totalKnownHashes = new Set<string>();
@@ -177,7 +188,8 @@ export function useSyncBlossomBlobs() {
           let serverUploadSuccess = true;
           for (const targetServer of needsIt) {
             console.log(`[Blossom Sync] Uploading ${shortHash}... to ${targetServer}`);
-            const uploaded = await uploadBlob(targetServer, blobData, hash, user.signer);
+            const caps = serverCapabilities.get(targetServer);
+            const uploaded = await uploadBlob(targetServer, blobData, hash, user.signer, caps?.nip96Config || undefined);
             if (uploaded) {
               console.log(`[Blossom Sync] Uploaded ${shortHash}... to ${targetServer} successfully.`);
             } else {
@@ -242,11 +254,32 @@ async function getBlossomAuthHeader(
   return `Nostr ${btoa(JSON.stringify(signedEvent))}`;
 }
 
-async function getNIP98AuthHeader(url: string, method: 'GET' | 'PUT', signer: NostrSigner): Promise<string> {
+async function getNIP98AuthHeader(url: string, method: 'GET' | 'PUT' | 'POST', signer: NostrSigner): Promise<string> {
   const request = new Request(url, { method });
   const template = await NIP98.template(request, { validatePayload: false });
   const event = await signer.signEvent(template);
   return `Nostr ${btoa(JSON.stringify(event))}`;
+}
+
+interface ServerCapabilities {
+  isNip96: boolean;
+  nip96Config: Record<string, unknown> | null;
+}
+
+async function getServerCapabilities(serverUrl: string): Promise<ServerCapabilities> {
+  try {
+    const wellKnownUrl = new URL('/.well-known/nostr/nip96.json', serverUrl).toString();
+    const res = await fetch(wellKnownUrl);
+    if (res.ok) {
+      const config = (await res.json()) as Record<string, unknown>;
+      if (typeof config.api_url === 'string') {
+        return { isNip96: true, nip96Config: config };
+      }
+    }
+  } catch {
+    // Ignore errors, server likely doesn't support NIP-96
+  }
+  return { isNip96: false, nip96Config: null };
 }
 
 async function verifyBlobSha256(blob: Blob, expectedHash: string): Promise<boolean> {
@@ -341,51 +374,77 @@ export async function downloadBlob(serverUrl: string, sha256: string, pubkey: st
   }
 }
 
-export async function uploadBlob(serverUrl: string, blob: Blob, sha256: string, signer: NostrSigner): Promise<boolean> {
+export async function uploadBlob(
+  serverUrl: string, 
+  blob: Blob, 
+  sha256: string, 
+  signer: NostrSigner,
+  nip96Config?: Record<string, unknown>
+): Promise<boolean> {
   const baseUrl = serverUrl.replace(/\/$/, '');
-  const url = `${baseUrl}/upload`; // BUD-02 specifies PUT /upload, not PUT /<sha256>
   
-  try {
-    let authHeader = await getBlossomAuthHeader('upload', sha256, signer);
-    
-    let res = await fetch(url, {
+  // 1. Try Blossom BUD-02/BUD-11
+  const blossomUrl = `${baseUrl}/upload`;
+  let authHeader = await getBlossomAuthHeader('upload', sha256, signer);
+  
+  let res = await fetch(blossomUrl, {
+    method: 'PUT',
+    headers: { 
+      'Authorization': authHeader,
+      'Content-Type': blob.type || 'application/octet-stream',
+      'X-SHA-256': sha256
+    },
+    body: blob
+  });
+  
+  // Fallback to NIP-98 for Blossom if 401
+  if (res.status === 401) {
+    authHeader = await getNIP98AuthHeader(blossomUrl, 'PUT', signer);
+    res = await fetch(blossomUrl, {
       method: 'PUT',
       headers: { 
         'Authorization': authHeader,
         'Content-Type': blob.type || 'application/octet-stream',
-        'X-SHA-256': sha256 // BUD-02: Optional but recommended for pre-validation
+        'X-SHA-256': sha256
       },
       body: blob
     });
+  }
+  
+  if (res.ok) {
+    return true;
+  }
+
+  // 2. If Blossom failed and we have NIP-96 config, try NIP-96
+  if (nip96Config && typeof nip96Config.api_url === 'string') {
+    console.log(`[Blossom Sync] Blossom upload failed, trying NIP-96 fallback for ${sha256.slice(0, 8)}...`);
+    const apiUrl = nip96Config.api_url;
+    const nip96Url = apiUrl.startsWith('http') ? apiUrl : new URL(apiUrl, baseUrl).toString();
     
-    // Fallback to NIP-98 if the server rejects the Kind 24242 auth
-    if (res.status === 401) {
-      authHeader = await getNIP98AuthHeader(url, 'PUT', signer);
-      res = await fetch(url, {
-        method: 'PUT',
-        headers: { 
-          'Authorization': authHeader,
-          'Content-Type': blob.type || 'application/octet-stream',
-          'X-SHA-256': sha256
-        },
-        body: blob
-      });
-    }
+    const nip98Auth = await getNIP98AuthHeader(nip96Url, 'POST', signer);
+    const formData = new FormData();
+    formData.append('file', blob);
     
-    if (res.ok) {
+    const nip96Res = await fetch(nip96Url, {
+      method: 'POST',
+      headers: {
+        'Authorization': nip98Auth,
+      },
+      body: formData
+    });
+    
+    if (nip96Res.ok) {
+      console.log(`[Blossom Sync] Successfully uploaded via NIP-96 to ${nip96Url}`);
       return true;
     }
     
-    const text = await res.text().catch(() => '');
-    console.warn(`[Blossom Sync] Upload failed for ${sha256.slice(0, 8)}... to ${serverUrl}: ${res.status} ${text}`);
-    return false;
-  } catch (err) {
-    if (err instanceof TypeError) {
-      console.warn(`[Blossom Sync] Network/CORS error uploading ${sha256.slice(0, 8)}... to ${serverUrl}. The server may not support this operation or rejected the request. Skipping.`);
-      return false;
-    }
-    throw err;
+    const text = await nip96Res.text().catch(() => '');
+    console.warn(`[Blossom Sync] NIP-96 Upload failed to ${nip96Url}: ${nip96Res.status} ${text}`);
   }
+  
+  const finalText = await res.text().catch(() => '');
+  console.warn(`[Blossom Sync] Upload failed for ${sha256.slice(0, 8)}... to ${serverUrl}: ${res.status} ${finalText}`);
+  return false;
 }
 
 export interface RepairResult {
@@ -405,6 +464,12 @@ export function useRepairBlossomIndex() {
       if (servers.length === 0) throw new Error('No blossom servers configured for this user');
       
       console.log(`[Blossom Repair] Starting index repair for ${hashes.length} hashes across ${servers.length} servers.`);
+      
+      // Fetch server capabilities for NIP-96 fallback
+      const serverCapabilities = new Map<string, ServerCapabilities>();
+      for (const server of servers) {
+        serverCapabilities.set(server, await getServerCapabilities(server));
+      }
       
       const results: RepairResult[] = [];
 
@@ -444,11 +509,12 @@ export function useRepairBlossomIndex() {
           continue;
         }
 
-        // 2. Re-upload to ALL servers to claim ownership and fix index (BUD-02)
+        // 2. Re-upload to ALL servers to claim ownership and fix index (BUD-02 / NIP-96)
         for (const serverUrl of servers) {
           console.log(`[Blossom Repair] Uploading/Claiming ${shortHash}... on ${serverUrl}`);
           try {
-            const uploaded = await uploadBlob(serverUrl, blobData, cleanHash, user.signer);
+            const caps = serverCapabilities.get(serverUrl);
+            const uploaded = await uploadBlob(serverUrl, blobData, cleanHash, user.signer, caps?.nip96Config || undefined);
             if (uploaded) {
               console.log(`[Blossom Repair] Successfully claimed ${shortHash}... on ${serverUrl}.`);
               overallSuccess = true;
