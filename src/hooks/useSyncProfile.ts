@@ -47,6 +47,14 @@ export function useSyncProfile() {
         throw new Error('No events to sync');
       }
 
+      // Pre-flight check for Mixed Content (HTTPS page trying to connect to WS relay)
+      if (typeof window !== 'undefined' && window.location.protocol === 'https:' && targetRelay.startsWith('ws://')) {
+        throw new Error(
+          `Browser security blocked the connection: Cannot connect to an unencrypted 'ws://' relay from a secure 'https://' website. ` +
+          `Please use a secure 'wss://' URL (e.g., via Tailscale MagicDNS), or access this app locally via 'http://'.`
+        );
+      }
+
       if (!user) {
         throw new Error('User must be logged in to sync profile');
       }
