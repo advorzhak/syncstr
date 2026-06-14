@@ -183,17 +183,30 @@ export function useSyncBlossomBlobs() {
             continue;
           }
           
-          console.log(`[Blossom Sync] Verified ${shortHash}... (${(blobData.size / 1024).toFixed(1)} KB). Uploading to missing servers...`);
+          console.log(`[Blossom Sync] Verified ${shortHash}... (${(blobData.size / 1024).toFixed(1)} KB). Syncing to missing servers...`);
           
           let serverUploadSuccess = true;
+          const sourceBlobUrl = `${sourceServer.replace(/\/$/, '')}/${hash}`;
+
           for (const targetServer of needsIt) {
-            console.log(`[Blossom Sync] Uploading ${shortHash}... to ${targetServer}`);
+            console.log(`[Blossom Sync] Attempting BUD-04 mirror of ${shortHash}... to ${targetServer}`);
+            
+            const mirrored = await mirrorBlob(targetServer, sourceBlobUrl, hash, user.signer);
+            
+            if (mirrored) {
+              console.log(`[Blossom Sync] Mirrored ${shortHash}... to ${targetServer} successfully.`);
+              continue; // Move to next target server
+            }
+
+            // Fallback to download/upload if mirroring is unsupported or failed
+            console.log(`[Blossom Sync] Mirroring failed or unsupported. Falling back to upload for ${shortHash}... to ${targetServer}`);
             const caps = serverCapabilities.get(targetServer);
             const uploaded = await uploadBlob(targetServer, blobData, hash, user.signer, caps?.nip96Config || undefined);
+            
             if (uploaded) {
-              console.log(`[Blossom Sync] Uploaded ${shortHash}... to ${targetServer} successfully.`);
+              console.log(`[Blossom Sync] Uploaded ${shortHash}... to ${targetServer} successfully (fallback).`);
             } else {
-              console.warn(`[Blossom Sync] Failed to upload ${shortHash}... to ${targetServer}.`);
+              console.warn(`[Blossom Sync] Failed to upload ${shortHash}... to ${targetServer} (fallback).`);
               serverUploadSuccess = false;
             }
           }
@@ -229,7 +242,7 @@ export function useSyncBlossomBlobs() {
 }
 
 async function getBlossomAuthHeader(
-  action: 'get' | 'upload' | 'list' | 'delete', 
+  action: 'get' | 'upload' | 'list' | 'delete' | 'mirror', 
   sha256: string | undefined, 
   signer: NostrSigner
 ): Promise<string> {
@@ -409,6 +422,66 @@ export async function downloadBlob(serverUrl: string, sha256: string, pubkey: st
     if (err instanceof TypeError) {
       console.warn(`[Blossom Sync] Network/CORS error fetching ${sha256.slice(0, 8)}... from ${serverUrl}. The blob may be missing or the server rejected the request. Skipping.`);
       return null;
+    }
+    throw err;
+  }
+}
+
+async function mirrorBlob(
+  targetServerUrl: string,
+  sourceUrl: string,
+  sha256: string,
+  signer: NostrSigner
+): Promise<boolean> {
+  const baseUrl = targetServerUrl.replace(/\/$/, '');
+  const mirrorUrl = `${baseUrl}/mirror`;
+  const shortHash = sha256.slice(0, 8);
+
+  try {
+    // 1. Try BUD-11 (Kind 24242) with t="mirror"
+    const authHeader = await getBlossomAuthHeader('mirror', sha256, signer);
+    
+    let res = await fetch(mirrorUrl, {
+      method: 'PUT',
+      headers: {
+        'Authorization': authHeader,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ url: sourceUrl })
+    });
+
+    // Fallback to NIP-98 if 401
+    if (res.status === 401) {
+      const nip98Auth = await getNIP98AuthHeader(mirrorUrl, 'PUT', signer);
+      res = await fetch(mirrorUrl, {
+        method: 'PUT',
+        headers: {
+          'Authorization': nip98Auth,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ url: sourceUrl })
+      });
+    }
+
+    if (res.ok) {
+      console.log(`[Blossom Sync] Successfully mirrored ${shortHash}... to ${targetServerUrl}`);
+      return true;
+    }
+
+    // If the server doesn't support mirroring (404/405), return false to trigger fallback
+    if (res.status === 404 || res.status === 405) {
+      console.log(`[Blossom Sync] Server ${targetServerUrl} does not support BUD-04 mirroring. Falling back to download/upload.`);
+      return false;
+    }
+
+    const text = await res.text().catch(() => '');
+    console.warn(`[Blossom Sync] Mirror request failed for ${shortHash}... to ${targetServerUrl}: ${res.status} ${text}`);
+    return false;
+
+  } catch (err) {
+    if (err instanceof TypeError) {
+      console.warn(`[Blossom Sync] Network error attempting mirror for ${shortHash}... to ${targetServerUrl}. Falling back.`);
+      return false;
     }
     throw err;
   }
