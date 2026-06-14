@@ -450,9 +450,6 @@ export function ProfileSync() {
               </CardContent>
             </Card>
 
-            {/* Blossom Sync Section */}
-            <BlossomSyncCard />
-
             {/* Sync Controls */}
             <SyncButton
               sourceRelay={currentSource}
@@ -462,6 +459,9 @@ export function ProfileSync() {
               isLoading={isSyncing}
               syncResult={syncResult}
             />
+
+            {/* Blossom Sync Section */}
+            <BlossomSyncCard />
           </div>
         </div>
 

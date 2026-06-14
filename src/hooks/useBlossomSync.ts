@@ -32,6 +32,72 @@ export function useBlossomServers() {
   });
 }
 
+export interface BlossomServerStats {
+  totalUniqueBlobs: number;
+  fullySyncedBlobs: number;
+  serverStats: {
+    url: string;
+    presentCount: number;
+    missingCount: number;
+  }[];
+}
+
+export function useBlossomSyncStats() {
+  const { data: servers = [] } = useBlossomServers();
+  const { user } = useCurrentUser();
+
+  return useQuery({
+    queryKey: ['blossom-sync-stats', servers.join(','), user?.pubkey],
+    enabled: !!user && servers.length > 0,
+    queryFn: async () => {
+      if (!user) throw new Error('Not logged in');
+
+      const serverBlobs = new Map<string, Set<string>>();
+      const totalKnownHashes = new Set<string>();
+
+      for (const server of servers) {
+        try {
+          const blobs = await fetchBlobList(server, user.pubkey, user.signer);
+          const hashes = new Set(blobs.map(b => b.sha256));
+          serverBlobs.set(server, hashes);
+          for (const h of hashes) totalKnownHashes.add(h);
+        } catch (err) {
+          console.warn(`[Blossom Stats] Failed to fetch inventory from ${server}.`, err);
+          serverBlobs.set(server, new Set());
+        }
+      }
+
+      const serverStats = servers.map(server => {
+        const present = serverBlobs.get(server) || new Set();
+        let missingCount = 0;
+        for (const hash of totalKnownHashes) {
+          if (!present.has(hash)) {
+            missingCount++;
+          }
+        }
+        return {
+          url: server,
+          presentCount: present.size,
+          missingCount,
+        };
+      });
+
+      // Blobs that are present on ALL servers
+      let fullySyncedBlobs = 0;
+      for (const hash of totalKnownHashes) {
+        const isEverywhere = servers.every(server => serverBlobs.get(server)?.has(hash));
+        if (isEverywhere) fullySyncedBlobs++;
+      }
+
+      return {
+        totalUniqueBlobs: totalKnownHashes.size,
+        fullySyncedBlobs,
+        serverStats,
+      } as BlossomServerStats;
+    },
+  });
+}
+
 export function useSyncBlossomBlobs() {
   const { user } = useCurrentUser();
   const { toast } = useToast();
