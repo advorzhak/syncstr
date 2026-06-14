@@ -442,6 +442,34 @@ export async function uploadBlob(
     });
   };
 
+  // 0. BUD-06 Pre-validation (Fail fast for size/type limits before uploading)
+  try {
+    const headRes = await fetch(blossomUrl, {
+      method: 'HEAD',
+      headers: {
+        'Content-Type': blob.type || 'application/octet-stream',
+        'Content-Length': blob.size.toString(),
+        'X-SHA-256': sha256
+      }
+    });
+    
+    if (headRes.status === 413) {
+      console.warn(`[Blossom Sync] Pre-validation failed for ${shortHash}...: File size (${(blob.size / 1024 / 1024).toFixed(2)} MB) exceeds server limit.`);
+      return false;
+    }
+    if (headRes.status === 415) {
+      console.warn(`[Blossom Sync] Pre-validation failed for ${shortHash}...: Media type '${blob.type}' is not accepted by this server.`);
+      return false;
+    }
+    if (headRes.status >= 400 && headRes.status < 500 && headRes.status !== 401) {
+      console.warn(`[Blossom Sync] Pre-validation failed for ${shortHash}...: Server returned ${headRes.status}.`);
+      return false;
+    }
+  } catch (err) {
+    // If HEAD fails (e.g., CORS or network), we still attempt the PUT as a fallback
+    console.warn(`[Blossom Sync] BUD-06 HEAD pre-check failed for ${shortHash}..., attempting PUT anyway.`, err);
+  }
+
   // 1. Try Blossom BUD-02/BUD-11 (with 1 retry for transient 5xx errors)
   let res = await attemptBlossomUpload(false);
   
@@ -453,7 +481,7 @@ export async function uploadBlob(
   if (res.status >= 500 && res.status < 600) {
     console.warn(`[Blossom Sync] Transient server error (${res.status}) for ${shortHash}... Retrying once...`);
     await new Promise(resolve => setTimeout(resolve, 1500)); // 1.5s backoff
-    res = await attemptBlossomUpload(res.status === 401); // Preserve auth method if it was 401 before, though unlikely for 5xx
+    res = await attemptBlossomUpload(res.status === 401); 
   }
   
   if (res.ok) {
